@@ -4,81 +4,87 @@ import threading
 import time
 
 class DustMeter(threading.Thread):
-    DustCount = dict()
-    g_locker = threading.Lock()
-    def __init__(self, host='localhost', port=8888):
+    defaultProps= {
+        'name': 'myDustMeter',
+        'host': 'localhost',
+        'port':  8888,
+        'default_dust': 0,
+        'reconnect': True
+    }
+    
+    def __init__(self, **kwargs):
         threading.Thread.__init__(self)
-        threading.Thread.setName(self, host+':'+str(port))
-        self.host = host
-        self.port = port
-        self.addr = host+':'+str(port)
-        self.dust_small = -1
-        self.dust_large = -1
+        for attr, value in DustMeter.defaultProps.items():
+            if attr not in kwargs:
+                kwargs[attr] = value        
+        self.name = kwargs['name']
+        self.host = kwargs['host']
+        self.port = kwargs['port']
+        self.reconnect = kwargs['reconnect']
+        self.dust_small = kwargs['default_dust']
+        self.dust_large = kwargs['default_dust']
+        self.is_connected = False
         self.ev = threading.Event()
-        DustMeter.g_locker.acquire()
-        DustMeter.DustCount[self.host] = [self.dust_small, self.dust_large]
-        DustMeter.g_locker.release()
-    def __del__(self):
-        self.__class__.g_locker.acquire()
-        self.__class__.DustCount.pop(self.host, None)
-        self.__class__.g_locker.release()
     def run(self):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        if s.connect_ex((self.host, self.port)) != 0:
-            print 'the host/port is unreachable!', self.host, self.port
-            return
-        inout = [s]
-        idel_loop_count = 0
-        while 1:
-            infds, outfds, errfds = select.select(inout, [], [], 0.01)
-            if len(infds) != 0:
-                time.sleep(0.1)
-                buf = s.recv(64)
-                if len(buf) != 0:
-                    idel_loop_count = 0;
-                    [small_str, large_str] = buf.split(',')
-                    self.dust_small=int(small_str)
-                    self.dust_large=int(large_str)
-                    print '<', self.host, '>', 'receives data:', repr(buf)
-                    DustMeter.g_locker.acquire()
-                    DustMeter.DustCount[self.host] = [self.dust_small, self.dust_large]
-                    # print repr(DustMeter.DustCount)
-                    DustMeter.g_locker.release()
-            if self.ev.wait(30):
-                self.ev.clear()
-                break;
+        while True:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if s.connect_ex((self.host, self.port)) == 0:
+                self.is_connected = True
+                print self.name, '#', self.host+':'+str(self.port), 'is connected!'
             else:
-                idel_loop_count += 1
-                if(idel_loop_count > 4):
-                    print 'no incoming data, stop connection'
-                    break;
-                
-        s.close()
-        self.dust_small = -1
-        self.dust_large = -1
-        DustMeter.g_locker.acquire()
-        DustMeter.DustCount[self.host] = [-1, -1]
-        DustMeter.g_locker.release()
+                self.is_connected = False
+                print self.name, '#', self.host+':'+str(self.port), 'is unreachable!'
+                if self.reconnect:
+                    print self.name, '#', 'reconnect later'
+                    time.sleep(30)
+                    continue
+                else:
+                    print self.name, '#', 'no connection, stop'
+                    self.dust_small = DustMeter.defaultProps['default_dust']
+                    self.dust_large = DustMeter.defaultProps['default_dust']
+                    s.close()
+                    break
+            inout = [s]
+            idel_loop_count = 0
+            while True:
+                infds, outfds, errfds = select.select(inout, [], [], 0.01)
+                if len(infds) != 0:
+                    time.sleep(0.1)
+                    buf = s.recv(64)
+                    if len(buf) != 0:
+                        idel_loop_count = 0;
+                        [small_str, large_str] = buf.split(',')
+                        self.dust_small=int(small_str)
+                        self.dust_large=int(large_str)
+                        print self.name, '#', 'receive data:', repr(buf)
+                if self.ev.wait(30):
+                    self.ev.clear()
+                    print self.name, '#', 'close connection by user'
+                    self.dust_small = DustMeter.defaultProps['default_dust']
+                    self.dust_large = DustMeter.defaultProps['default_dust']
+                    self.is_connected = False
+                    s.close()
+                    return
+                else:
+                    idel_loop_count += 1
+                    if(idel_loop_count > 4):
+                        print self.name, '#','no incoming data, closing connection'
+                        self.dust_small = DustMeter.defaultProps['default_dust']
+                        self.dust_large = DustMeter.defaultProps['default_dust']
+                        self.is_connected = False
+                        s.close()
+                        break
+        
     def stop(self):
         self.ev.set()
-        
+    
 if __name__ == "__main__":
-    HOST_0 = 'localhost'
-    dustmeter_0 = DustMeter(HOST_0)
-    dustmeter_0.start()
 
-    HOST_1 = 'fhlrs232_a27.desy.de'
-    dustmeter_1 = DustMeter(HOST_1)
-    dustmeter_1.start()
-
+    d = DustMeter(name = 'mydustmeter_somewhere', host = 'fhlrs232_a27.desy.de')
+    d.start()
     time.sleep(70)
-    print 'wake'
-    dustmeter_0.stop()
+    print 'wake up'
+    d.stop()
     print 'stop 0'
-    dustmeter_0.join()
+    d.join()
     print 'join 0'
-
-    dustmeter_1.stop()
-    print 'stop 1'
-    dustmeter_1.join()
-    print 'join 1'

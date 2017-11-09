@@ -1,140 +1,136 @@
 #!/usr/bin/env python
 
-"""
-This sample application shows how to extend the basic functionality of a device
-to support the ReadPropertyMultiple service.
-ReadPropertyMultipleServer.py v0.16.2
-"""
+import netifaces
+import time
+import threading
 
 import dustmeter
 
-import random
-import netifaces
-import time
-
-from bacpypes.debugging import bacpypes_debugging, ModuleLogger
-from bacpypes.consolelogging import ConfigArgumentParser
-
 from bacpypes.core import run
-
-from bacpypes.primitivedata import Real
-from bacpypes.object import AnalogValueObject, Property, register_object_type
+from bacpypes.debugging import bacpypes_debugging, ModuleLogger
 from bacpypes.errors import ExecutionError
+
+from bacpypes.primitivedata import Real, CharacterString, Unsigned, Boolean
+from bacpypes.basetypes import EngineeringUnits
+from bacpypes.object import AnalogInputObject, Property
 
 from bacpypes.app import BIPSimpleApplication
 from bacpypes.service.device import LocalDeviceObject
 from bacpypes.service.object import ReadWritePropertyMultipleServices
 
-# some debugging
-_debug = 0
-_log = ModuleLogger(globals())
-
-#
-#   ReadPropertyMultipleApplication
-#
-
-@bacpypes_debugging
-class ReadPropertyMultipleApplication(BIPSimpleApplication, ReadWritePropertyMultipleServices):
-    pass
-
-#
-#   DustValueProperty
-#
-
-@bacpypes_debugging
-class DustValueProperty(Property):
-    
-    def __init__(self, identifier):
-        if _debug: DustValueProperty._debug("__init__ %r", identifier)
-        Property.__init__(self, identifier, Real, default=None, optional=True, mutable=False)
-    def ReadProperty(self, obj, arrayIndex=None):
-        if _debug: DustValueProperty._debug("ReadProperty %r arrayIndex=%r", obj, arrayIndex)
-        index = arrayIndex
-        if index is None:
-            index = 0
-        if index>1:
-            index = 1
-        value = 0
-        if obj.objectName in dustmeter.DustMeter.DustCount:
-            value = dustmeter.DustMeter.DustCount[obj.objectName][index]
-        if _debug: DustValueProperty._debug("    - value: %r", value)
-        return value
-
-    def WriteProperty(self, obj, value, arrayIndex=None, priority=None, direct=False):
-        if _debug: DustValueProperty._debug("WriteProperty %r %r arrayIndex=%r priority=%r direct=%r", obj, value, arrayIndex, priority, direct)
-        raise ExecutionError(errorClass='property', errorCode='writeAccessDenied')
-
-#
-#   Dust Value Object Type
-#
-
-@bacpypes_debugging
-class DustAnalogValueObject(AnalogValueObject):
-    def __init__(self, **kwargs):
-        if _debug: DustAnalogValueObject._debug("__init__ %r", kwargs)
-        AnalogValueObject.__init__(self, **kwargs)
-        pv = DustValueProperty('presentValue')
-        self.add_property(pv)
-
-register_object_type(DustAnalogValueObject)
-
-#
-#   __main__
-#
+class dataThread(threading.Thread):
+    def __init__(self, meters, objs):
+        threading.Thread.__init__(self)
+        threading.Thread.setName(self, 'dataThread')
+        self.meters = meters
+        self.objs = objs
+        self.flag_stop = False
+    def run(self):
+        while not self.flag_stop:
+            time.sleep(1)
+            for obj in self.objs:
+                objname = str(obj._values['objectName'])
+                for meter in self.meters:
+                    if meter.name == objname:
+                        obj._values['outOfService'] = Boolean(not meter.is_connected)
+                        obj._values['presentValue'] = Real(meter.dust_small*100)
+                        
+    def stop(self):
+        self.flag_stop = True
 
 def main():
-    meterhosts = list()
-    meters = list()
-    # meterhosts.append('fhlrs232_a19.desy.de')
-    meterhosts.append('fhlrs232_a27.desy.de')
-    meterhosts.append('fhlrs232_a40.desy.de')
-    # meterhosts.append('fhlrs232_a43.desy.de')
-    # meterhosts.append('fhlrs232_a49.desy.de')
-    # meterhosts.append('fhlrs232_a56.desy.de')
-    for h in meterhosts:
-        m = dustmeter.DustMeter(h)
+    device_info = {
+        'ip': '10.169.204.200',
+        'netmask': 23,
+        'port': 47809,
+        'objectName': 'FHL-DAF-DUSTMETER',
+        'objectIdentifier': 522020,
+        'vendorIdentifier': 15,
+        'location': 'FHL-DAF-CLEAN-ROOM',
+        'vendorName': 'DESY-ATLAS',
+        'modelName': 'DUST-METERS',
+        'softwareVersion': 'bacpypes_v0.16.2_py27',
+        'description': 'FHL-DAF clean room dustmeter server'
+    }
+
+    print device_info
+    
+    this_device = LocalDeviceObject(
+        objectName=device_info['objectName'],
+        objectIdentifier=device_info['objectIdentifier'],
+        vendorIdentifier=device_info['vendorIdentifier']
+    )
+    
+    this_device._values['location'] = CharacterString(device_info['location'])
+    this_device._values['vendorName'] = CharacterString(device_info['vendorName'])
+    this_device._values['modelName'] = CharacterString(device_info['modelName'])
+    this_device._values['applicationSoftwareVersion'] = CharacterString(device_info['softwareVersion'])
+    this_device._values['description'] = CharacterString(device_info['description'])
+    
+    this_addr = str(device_info['ip']+'/'+str(device_info['netmask'])+':'+str(device_info['port']))
+    print 'bacnet server will listen at', this_addr
+    this_application = BIPSimpleApplication(this_device, this_addr)
+    this_application.add_capability(ReadWritePropertyMultipleServices)
+    this_device.protocolServicesSupported = this_application.get_services_supported().value
+
+    meter_info = [
+        {'name': 'dustmeter_a19',
+         'index': 1,
+         'host': 'fhlrs232_a19.desy.de',
+         'description': 'dustmeter on RS232-Ethernet bridge at somewhere',
+        },
+        {'name': 'dustmeter_a27',
+         'index': 2,
+         'host': 'fhlrs232_a27.desy.de',
+         'description': 'dustmeter on RS232-Ethernet bridge at somewhere',
+        },
+        {'name': 'dustmeter_a40',
+         'index': 3,
+         'host': 'fhlrs232_a40.desy.de',
+         'description': 'dustmeter on RS232-Ethernet bridge at somewhere',
+        },
+        {'name': 'dustmeter_a43',
+         'index': 4,
+         'host': 'fhlrs232_a43.desy.de',
+         'description': 'dustmeter on RS232-Ethernet bridge at somewhere',
+        },
+        {'name': 'dustmeter_a49',
+         'index': 5,
+         'host': 'fhlrs232_a49.desy.de',
+         'description': 'dustmeter on RS232-Ethernet bridge at somewhere',
+        },
+        {'name': 'dustmeter_a56',
+         'index': 6,
+         'host': 'fhlrs232_a56.desy.de',
+         'description': 'dustmeter on RS232-Ethernet bridge at somewhere',
+        },
+    ]
+    
+    meters = []
+    for info in meter_info:
+        m = dustmeter.DustMeter(name = info['name'], host = info['host'])
         m.start()
         meters.append(m)
-        
-    ifaces=netifaces.interfaces()
-    print ifaces
-    iface='wlo1'
-    local_ip     = netifaces.ifaddresses(iface)[netifaces.AF_INET][0]['addr']
-    local_mask   = netifaces.ifaddresses(iface)[netifaces.AF_INET][0]['netmask']
-    local_prefix = sum([bin(int(x)).count('1') for x in local_mask.split('.')])
-    local_addr = str(local_ip+'/'+str(local_prefix))
-    print iface
-    print local_addr
-
     
-    if _debug: _log.debug("initialization")
+    objs = []
+    for info in meter_info:
+        ai_obj = AnalogInputObject(objectIdentifier=('analogInput', info['index']), \
+                                   objectName=info['name'])
+        ai_obj._values['description'] = CharacterString(info['description'])
+        ai_obj._values['deviceType'] = CharacterString('Particles(>0.5um) PerCubicFoot')
+        ai_obj._values['units'] = EngineeringUnits('noUnits')
+        ai_obj._values['updateInterval'] = Unsigned(60)
+        ai_obj._values['resolution'] = Real(100)
+        this_application.add_object(ai_obj)
+        objs.append(ai_obj)
 
-    this_device = LocalDeviceObject(
-        objectName='catkins',
-        objectIdentifier=600,
-        maxApduLengthAccepted=1024,
-        segmentationSupported='segmentedBoth',
-        vendorIdentifier=15,
-        )
-
-    this_application = ReadPropertyMultipleApplication(this_device, local_addr)
-
-    meter_count = 1
-    for h in meterhosts:
-        dav = DustAnalogValueObject(objectIdentifier=('analogValue', meter_count), objectName=h)
-        _log.debug("    - dav: %r", dav)
-        this_application.add_object(dav)
-        meter_count += 1
-    _log.debug("    - object list: %r", this_device.objectList)
-
-    services_supported = this_application.get_services_supported()
-    if _debug: _log.debug("    - services_supported: %r", services_supported)
-
-    this_device.protocolServicesSupported = services_supported.value
-
-    _log.debug("running")
-
+    mythread = dataThread(meters, objs)
+    mythread.start()
+    
     run()
+    
+    mythread.stop()
+    mythread.join()
     for m in meters:
         m.stop()
         m.join()
